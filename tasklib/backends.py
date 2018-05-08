@@ -466,6 +466,7 @@ class TaskWarrior(Backend):
             elif re.match(r'^    [^ ].*', line):
                 subsubkey = line.lstrip().split(' ')[0]
                 self.projects[key][subkey][subsubkey] = {}
+
     def _set_task_attrs(self):
         available_task_attrs = self.TASK_STANDARD_ATTRS
         udas = set()
