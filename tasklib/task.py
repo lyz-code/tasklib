@@ -327,20 +327,24 @@ class Task(TaskResource):
         # Check that all the tasks are saved
         for task in (cur_dependencies or set()):
             if not task.saved:
-                raise Task.NotSaved('Task \'%s\' needs to be saved before '
-                                    'it can be set as dependency.' % task)
+                raise Task.NotSaved(
+                    'Task \'%s\' needs to be saved before '
+                    'it can be set as dependency.' % task,
+                )
 
         return super(Task, self).serialize_depends(cur_dependencies)
 
     def delete(self):
         if not self.saved:
-            raise Task.NotSaved("Task needs to be saved before it can be deleted")
+            raise Task.NotSaved(
+                'Task needs to be saved before it can be deleted',
+            )
 
         # Refresh the status, and raise exception if the task is deleted
         self.refresh(only_fields=['status'])
 
         if self.deleted:
-            raise Task.DeletedTask("Task was already deleted")
+            raise Task.DeletedTask('Task was already deleted')
 
         self.backend.delete_task(self)
 
@@ -349,17 +353,19 @@ class Task(TaskResource):
 
     def start(self):
         if not self.saved:
-            raise Task.NotSaved("Task needs to be saved before it can be started")
+            raise Task.NotSaved(
+                'Task needs to be saved before it can be started',
+            )
 
         # Refresh, and raise exception if task is already completed/deleted
         self.refresh(only_fields=['status'])
 
         if self.completed:
-            raise Task.CompletedTask("Cannot start a completed task")
+            raise Task.CompletedTask('Cannot start a completed task')
         elif self.deleted:
-            raise Task.DeletedTask("Deleted task cannot be started")
+            raise Task.DeletedTask('Deleted task cannot be started')
         elif self.active:
-            raise Task.ActiveTask("Task is already active")
+            raise Task.ActiveTask('Task is already active')
 
         self.backend.start_task(self)
 
@@ -368,13 +374,15 @@ class Task(TaskResource):
 
     def stop(self):
         if not self.saved:
-            raise Task.NotSaved("Task needs to be saved before it can be stopped")
+            raise Task.NotSaved(
+                'Task needs to be saved before it can be stopped',
+            )
 
         # Refresh, and raise exception if task is already completed/deleted
         self.refresh(only_fields=['status'])
 
         if not self.active:
-            raise Task.InactiveTask("Cannot stop an inactive task")
+            raise Task.InactiveTask('Cannot stop an inactive task')
 
         self.backend.stop_task(self)
 
@@ -383,15 +391,17 @@ class Task(TaskResource):
 
     def done(self):
         if not self.saved:
-            raise Task.NotSaved("Task needs to be saved before it can be completed")
+            raise Task.NotSaved(
+                'Task needs to be saved before it can be completed',
+            )
 
         # Refresh, and raise exception if task is already completed/deleted
         self.refresh(only_fields=['status'])
 
         if self.completed:
-            raise Task.CompletedTask("Cannot complete a completed task")
+            raise Task.CompletedTask('Cannot complete a completed task')
         elif self.deleted:
-            raise Task.DeletedTask("Deleted task cannot be completed")
+            raise Task.DeletedTask('Deleted task cannot be completed')
 
         self.backend.complete_task(self)
 
@@ -407,14 +417,14 @@ class Task(TaskResource):
 
     def add_annotation(self, annotation):
         if not self.saved:
-            raise Task.NotSaved("Task needs to be saved to add annotation")
+            raise Task.NotSaved('Task needs to be saved to add annotation')
 
         self.backend.annotate_task(self, annotation)
         self.refresh(only_fields=['annotations'])
 
     def remove_annotation(self, annotation):
         if not self.saved:
-            raise Task.NotSaved("Task needs to be saved to remove annotation")
+            raise Task.NotSaved('Task needs to be saved to remove annotation')
 
         if isinstance(annotation, TaskAnnotation):
             annotation = annotation['description']
@@ -425,37 +435,67 @@ class Task(TaskResource):
     def refresh(self, only_fields=None, after_save=False):
         # Raise error when trying to refresh a task that has not been saved
         if not self.saved:
-            raise Task.NotSaved("Task needs to be saved to be refreshed")
+            raise Task.NotSaved('Task needs to be saved to be refreshed')
 
         new_data = self.backend.refresh_task(self, after_save=after_save)
 
         if only_fields:
             to_update = dict(
-                [(k, new_data.get(k)) for k in only_fields])
+                [(k, new_data.get(k)) for k in only_fields],
+            )
             self._update_data(to_update, update_original=True)
         else:
             self._load_data(new_data)
 
-    def task_active_time(self):
-        self.active_time = 0
-        task_history = [history_entry
-                        for history_entry in self.backend.history
-                        if self['uuid'] in history_entry['new']['uuid']]
+    def active_time(self, period=None):
+        """ Measure the active time of a task, if period is set,
+        it will calculate the time from now to the period, for example if
+        period = 'now - 1d', it will just measure the active time of the
+        last 24h"""
+        active_time = 0
+        task_history = [
+            history_entry
+            for history_entry in self.backend.history.entries
+            if self['uuid'] in history_entry['new']['uuid']
+        ]
+        if period:
+            oldest_possible_date = self.backend.convert_datetime_string(period)
 
         for history_entry in task_history:
+            if period and history_entry['time'] < oldest_possible_date:
+                continue
             try:
                 if history_entry['old']['start']:
                     try:
                         if history_entry['new']['start']:
                             pass
                     except KeyError:
-                        entry_seconds = history_entry['time'] - \
-                            datetime.datetime.fromtimestamp(
-                                float(history_entry['old']['start']))
-                        self.active_time += entry_seconds.total_seconds()
+                        entry_seconds = history_entry['new']['modified'] - \
+                            history_entry['old']['start']
+                        active_time += entry_seconds.total_seconds()
             except KeyError:
                 pass
-        return self.active_time
+
+            # Calculate the tasks that are active now
+            try:
+                history_entry['old']
+            except KeyError:
+                try:
+                    if history_entry['new']['start']:
+                        now = self.backend.convert_datetime_string(
+                            datetime.datetime.now().strftime('%Y%m%dT%H%M%S'),
+                        )
+                        if period and \
+                           history_entry['time'] < oldest_possible_date:
+                            entry_seconds = now - oldest_possible_date
+                        else:
+                            entry_seconds = now - history_entry['time']
+                        active_time += entry_seconds.total_seconds()
+                except KeyError:
+                    pass
+
+        return active_time
+
 
 class TaskQuerySet(object):
     """
@@ -482,7 +522,7 @@ class TaskQuerySet(object):
     def __repr__(self):
         data = list(self[:REPR_OUTPUT_SIZE + 1])
         if len(data) > REPR_OUTPUT_SIZE:
-            data[-1] = "...(remaining elements truncated)..."
+            data[-1] = '...(remaining elements truncated)...'
         return repr(data)
 
     def __len__(self):
@@ -570,7 +610,9 @@ class TaskQuerySet(object):
         if not num:
             raise Task.DoesNotExist(
                 'Task matching query does not exist. '
-                'Lookup parameters were {0}'.format(kwargs))
+                'Lookup parameters were {0}'.format(kwargs),
+            )
         raise ValueError(
             'get() returned more than one Task -- it returned {0}! '
-            'Lookup parameters were {1}'.format(num, kwargs))
+            'Lookup parameters were {1}'.format(num, kwargs),
+        )

@@ -1,5 +1,6 @@
 # coding=utf-8
 
+import os
 import copy
 import datetime
 import itertools
@@ -8,11 +9,12 @@ import pytz
 import six
 import shutil
 import sys
+import time
 import tempfile
 import unittest
 
-from .backends import TaskWarrior
-from .task import Task, ReadOnlyDictView, TaskQuerySet
+from .backends import TaskWarrior, TaskHistory
+from .task import Task, ReadOnlyDictView
 from .lazy import LazyUUIDTask, LazyUUIDTaskSet
 from .serializing import DATE_FORMAT, local_zone
 
@@ -40,7 +42,9 @@ TASK_STANDARD_ATTRS = (
     'annotations',
 )
 
-total_seconds_2_6 = lambda x: x.microseconds / 1e6 + x.seconds + x.days * 24 * 3600
+
+def total_seconds_2_6(x):
+    return x.microseconds / 1e6 + x.seconds + x.days * 24 * 3600
 
 
 class TasklibTest(unittest.TestCase):
@@ -59,44 +63,46 @@ class TaskFilterTest(TasklibTest):
         self.assertEqual(len(self.tw.tasks.all()), 0)
 
     def test_all_non_empty(self):
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
         self.assertEqual(len(self.tw.tasks.all()), 1)
         self.assertEqual(self.tw.tasks.all()[0]['description'], 'test task')
         self.assertEqual(self.tw.tasks.all()[0]['status'], 'pending')
 
     def test_pending_non_empty(self):
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
         self.assertEqual(len(self.tw.tasks.pending()), 1)
-        self.assertEqual(self.tw.tasks.pending()[0]['description'],
-                         'test task')
+        self.assertEqual(
+            self.tw.tasks.pending()[0]['description'],
+            'test task',
+        )
         self.assertEqual(self.tw.tasks.pending()[0]['status'], 'pending')
 
     def test_completed_empty(self):
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
         self.assertEqual(len(self.tw.tasks.completed()), 0)
 
     def test_completed_non_empty(self):
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
         self.assertEqual(len(self.tw.tasks.completed()), 0)
         self.tw.tasks.all()[0].done()
         self.assertEqual(len(self.tw.tasks.completed()), 1)
 
     def test_deleted_empty(self):
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
         self.assertEqual(len(self.tw.tasks.deleted()), 0)
 
     def test_deleted_non_empty(self):
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
         self.assertEqual(len(self.tw.tasks.deleted()), 0)
         self.tw.tasks.all()[0].delete()
         self.assertEqual(len(self.tw.tasks.deleted()), 1)
 
     def test_waiting_empty(self):
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
         self.assertEqual(len(self.tw.tasks.waiting()), 0)
 
     def test_waiting_non_empty(self):
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
         self.assertEqual(len(self.tw.tasks.waiting()), 0)
 
         t = self.tw.tasks.all()[0]
@@ -106,29 +112,36 @@ class TaskFilterTest(TasklibTest):
         self.assertEqual(len(self.tw.tasks.waiting()), 1)
 
     def test_recurring_empty(self):
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
         self.assertEqual(len(self.tw.tasks.recurring()), 0)
 
     def test_recurring_non_empty(self):
-        Task(self.tw, description="test task", recur="daily",
-             due=datetime.datetime.now()).save()
+        Task(
+            self.tw,
+            description='test task',
+            recur='daily',
+            due=datetime.datetime.now(),
+        ).save()
         self.assertEqual(len(self.tw.tasks.recurring()), 1)
 
     def test_filtering_by_attribute(self):
-        Task(self.tw, description="no priority task").save()
-        Task(self.tw, priority="H", description="high priority task").save()
+        Task(self.tw, description='no priority task').save()
+        Task(self.tw, priority='H', description='high priority task').save()
         self.assertEqual(len(self.tw.tasks.all()), 2)
 
         # Assert that the correct number of tasks is returned
-        self.assertEqual(len(self.tw.tasks.filter(priority="H")), 1)
+        self.assertEqual(len(self.tw.tasks.filter(priority='H')), 1)
 
         # Assert that the correct tasks are returned
-        high_priority_task = self.tw.tasks.get(priority="H")
-        self.assertEqual(high_priority_task['description'], "high priority task")
+        high_priority_task = self.tw.tasks.get(priority='H')
+        self.assertEqual(
+            high_priority_task['description'],
+            'high priority task',
+        )
 
     def test_filtering_by_empty_attribute(self):
-        Task(self.tw, description="no priority task").save()
-        Task(self.tw, priority="H", description="high priority task").save()
+        Task(self.tw, description='no priority task').save()
+        Task(self.tw, priority='H', description='high priority task').save()
         self.assertEqual(len(self.tw.tasks.all()), 2)
 
         # Assert that the correct number of tasks is returned
@@ -136,69 +149,69 @@ class TaskFilterTest(TasklibTest):
 
         # Assert that the correct tasks are returned
         no_priority_task = self.tw.tasks.get(priority=None)
-        self.assertEqual(no_priority_task['description'], "no priority task")
+        self.assertEqual(no_priority_task['description'], 'no priority task')
 
     def test_filter_for_task_with_space_in_descripition(self):
-        task = Task(self.tw, description="test task")
+        task = Task(self.tw, description='test task')
         task.save()
 
-        filtered_task = self.tw.tasks.get(description="test task")
-        self.assertEqual(filtered_task['description'], "test task")
+        filtered_task = self.tw.tasks.get(description='test task')
+        self.assertEqual(filtered_task['description'], 'test task')
 
     def test_filter_for_task_without_space_in_descripition(self):
-        task = Task(self.tw, description="test")
+        task = Task(self.tw, description='test')
         task.save()
 
-        filtered_task = self.tw.tasks.get(description="test")
-        self.assertEqual(filtered_task['description'], "test")
+        filtered_task = self.tw.tasks.get(description='test')
+        self.assertEqual(filtered_task['description'], 'test')
 
     def test_filter_for_task_with_space_in_project(self):
-        task = Task(self.tw, description="test", project="random project")
+        task = Task(self.tw, description='test', project='random project')
         task.save()
 
-        filtered_task = self.tw.tasks.get(project="random project")
-        self.assertEqual(filtered_task['project'], "random project")
+        filtered_task = self.tw.tasks.get(project='random project')
+        self.assertEqual(filtered_task['project'], 'random project')
 
     def test_filter_for_task_without_space_in_project(self):
-        task = Task(self.tw, description="test", project="random")
+        task = Task(self.tw, description='test', project='random')
         task.save()
 
-        filtered_task = self.tw.tasks.get(project="random")
-        self.assertEqual(filtered_task['project'], "random")
+        filtered_task = self.tw.tasks.get(project='random')
+        self.assertEqual(filtered_task['project'], 'random')
 
     def test_filter_with_empty_uuid(self):
         self.assertRaises(ValueError, lambda: self.tw.tasks.get(uuid=''))
 
     def test_filter_dummy_by_status(self):
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
 
         tasks = self.tw.tasks.filter(status=t['status'])
         self.assertEqual(list(tasks), [t])
 
     def test_filter_dummy_by_uuid(self):
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
 
         tasks = self.tw.tasks.filter(uuid=t['uuid'])
         self.assertEqual(list(tasks), [t])
 
     def test_filter_dummy_by_entry(self):
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
 
         tasks = self.tw.tasks.filter(entry=t['entry'])
         self.assertEqual(list(tasks), [t])
 
     def test_filter_dummy_by_description(self):
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
 
         tasks = self.tw.tasks.filter(description=t['description'])
         self.assertEqual(list(tasks), [t])
 
     def test_filter_dummy_by_start(self):
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
         t.start()
 
@@ -206,7 +219,7 @@ class TaskFilterTest(TasklibTest):
         self.assertEqual(list(tasks), [t])
 
     def test_filter_dummy_by_end(self):
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
         t.done()
 
@@ -214,14 +227,14 @@ class TaskFilterTest(TasklibTest):
         self.assertEqual(list(tasks), [t])
 
     def test_filter_dummy_by_due(self):
-        t = Task(self.tw, description="test", due=datetime.datetime.now())
+        t = Task(self.tw, description='test', due=datetime.datetime.now())
         t.save()
 
         tasks = self.tw.tasks.filter(due=t['due'])
         self.assertEqual(list(tasks), [t])
 
     def test_filter_dummy_by_until(self):
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
 
         tasks = self.tw.tasks.filter(until=t['until'])
@@ -238,35 +251,35 @@ class TaskFilterTest(TasklibTest):
             else:
                 return
 
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
 
         tasks = self.tw.tasks.filter(modified=t['modified'])
         self.assertEqual(list(tasks), [t])
 
     def test_filter_dummy_by_scheduled(self):
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
 
         tasks = self.tw.tasks.filter(scheduled=t['scheduled'])
         self.assertEqual(list(tasks), [t])
 
     def test_filter_dummy_by_tags(self):
-        t = Task(self.tw, description="test", tags=["home"])
+        t = Task(self.tw, description='test', tags=['home'])
         t.save()
 
         tasks = self.tw.tasks.filter(tags=t['tags'])
         self.assertEqual(list(tasks), [t])
 
     def test_filter_dummy_by_projects(self):
-        t = Task(self.tw, description="test", project="random")
+        t = Task(self.tw, description='test', project='random')
         t.save()
 
         tasks = self.tw.tasks.filter(project=t['project'])
         self.assertEqual(list(tasks), [t])
 
     def test_filter_by_priority(self):
-        t = Task(self.tw, description="test", priority="H")
+        t = Task(self.tw, description='test', priority='H')
         t.save()
 
         tasks = self.tw.tasks.filter(priority=t['priority'])
@@ -277,71 +290,83 @@ class TaskTest(TasklibTest):
 
     def test_create_unsaved_task(self):
         # Make sure a new task is not saved unless explicitly called for
-        t = Task(self.tw, description="test task")
+        Task(self.tw, description='test task')
         self.assertEqual(len(self.tw.tasks.all()), 0)
 
-    # TODO: once python 2.6 compatiblity is over, use context managers here
+    # TODO: once python 2.6 compatibility is over, use context managers here
     #       and in all subsequent tests for assertRaises
 
     def test_delete_unsaved_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         self.assertRaises(Task.NotSaved, t.delete)
 
     def test_complete_unsaved_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         self.assertRaises(Task.NotSaved, t.done)
 
     def test_refresh_unsaved_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         self.assertRaises(Task.NotSaved, t.refresh)
 
     def test_start_unsaved_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         self.assertRaises(Task.NotSaved, t.start)
 
     def test_delete_deleted_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.delete()
 
         self.assertRaises(Task.DeletedTask, t.delete)
 
     def test_complete_completed_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.done()
 
         self.assertRaises(Task.CompletedTask, t.done)
 
     def test_start_completed_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.done()
 
         self.assertRaises(Task.CompletedTask, t.start)
 
     def test_add_completed_task(self):
-        t = Task(self.tw, description="test", status="completed",
-                 end=datetime.datetime.now())
+        t = Task(
+            self.tw,
+            description='test',
+            status='completed',
+            end=datetime.datetime.now(),
+        )
         t.save()
 
     def test_add_multiple_completed_tasks(self):
-        t1 = Task(self.tw, description="test1", status="completed",
-                 end=datetime.datetime.now())
-        t2 = Task(self.tw, description="test2", status="completed",
-                 end=datetime.datetime.now())
+        t1 = Task(
+            self.tw,
+            description='test1',
+            status='completed',
+            end=datetime.datetime.now(),
+        )
+        t2 = Task(
+            self.tw,
+            description='test2',
+            status='completed',
+            end=datetime.datetime.now(),
+        )
         t1.save()
         t2.save()
 
     def test_complete_deleted_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.delete()
 
         self.assertRaises(Task.DeletedTask, t.done)
 
     def test_starting_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         now = t.datetime_normalizer(datetime.datetime.now())
         t.save()
         t.start()
@@ -350,7 +375,7 @@ class TaskTest(TasklibTest):
         self.assertEqual(t['status'], 'pending')
 
     def test_completing_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         now = t.datetime_normalizer(datetime.datetime.now())
         t.save()
         t.done()
@@ -359,7 +384,7 @@ class TaskTest(TasklibTest):
         self.assertEqual(t['status'], 'completed')
 
     def test_deleting_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         now = t.datetime_normalizer(datetime.datetime.now())
         t.save()
         t.delete()
@@ -368,51 +393,51 @@ class TaskTest(TasklibTest):
         self.assertEqual(t['status'], 'deleted')
 
     def test_started_task_active(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.start()
         self.assertTrue(t.active)
 
     def test_unstarted_task_inactive(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         self.assertFalse(t.active)
         t.save()
         self.assertFalse(t.active)
 
     def test_start_active_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.start()
         self.assertRaises(Task.ActiveTask, t.start)
 
     def test_stop_completed_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.start()
         t.done()
 
         self.assertRaises(Task.InactiveTask, t.stop)
 
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.done()
 
         self.assertRaises(Task.InactiveTask, t.stop)
 
     def test_stop_deleted_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.start()
         t.delete()
         t.stop()
 
     def test_stop_inactive_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
 
         self.assertRaises(Task.InactiveTask, t.stop)
 
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.start()
         t.stop()
@@ -420,8 +445,8 @@ class TaskTest(TasklibTest):
         self.assertRaises(Task.InactiveTask, t.stop)
 
     def test_stopping_task(self):
-        t = Task(self.tw, description="test task")
-        now = t.datetime_normalizer(datetime.datetime.now())
+        t = Task(self.tw, description='test task')
+        t.datetime_normalizer(datetime.datetime.now())
         t.save()
         t.start()
         t.stop()
@@ -431,41 +456,41 @@ class TaskTest(TasklibTest):
         self.assertFalse(t.active)
 
     def test_modify_simple_attribute_without_space(self):
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
 
-        self.assertEquals(t['description'], "test")
+        self.assertEquals(t['description'], 'test')
 
-        t['description'] = "test-modified"
+        t['description'] = 'test-modified'
         t.save()
 
-        self.assertEquals(t['description'], "test-modified")
+        self.assertEquals(t['description'], 'test-modified')
 
     def test_modify_simple_attribute_with_space(self):
         # Space can pose problems with parsing
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
 
-        self.assertEquals(t['description'], "test task")
+        self.assertEquals(t['description'], 'test task')
 
-        t['description'] = "test task modified"
+        t['description'] = 'test task modified'
         t.save()
 
-        self.assertEquals(t['description'], "test task modified")
+        self.assertEquals(t['description'], 'test task modified')
 
     def test_empty_dependency_set_of_unsaved_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         self.assertEqual(t['depends'], set())
 
     def test_empty_dependency_set_of_saved_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         self.assertEqual(t['depends'], set())
 
     def test_set_unsaved_task_as_dependency(self):
         # Adds only one dependency to task with no dependencies
-        t = Task(self.tw, description="test task")
-        dependency = Task(self.tw, description="needs to be done first")
+        t = Task(self.tw, description='test task')
+        dependency = Task(self.tw, description='needs to be done first')
 
         # We only save the parent task, dependency task is unsaved
         t.save()
@@ -475,8 +500,8 @@ class TaskTest(TasklibTest):
 
     def test_set_simple_dependency_set(self):
         # Adds only one dependency to task with no dependencies
-        t = Task(self.tw, description="test task")
-        dependency = Task(self.tw, description="needs to be done first")
+        t = Task(self.tw, description='test task')
+        dependency = Task(self.tw, description='needs to be done first')
 
         t.save()
         dependency.save()
@@ -487,9 +512,9 @@ class TaskTest(TasklibTest):
 
     def test_set_complex_dependency_set(self):
         # Adds two dependencies to task with no dependencies
-        t = Task(self.tw, description="test task")
-        dependency1 = Task(self.tw, description="needs to be done first")
-        dependency2 = Task(self.tw, description="needs to be done second")
+        t = Task(self.tw, description='test task')
+        dependency1 = Task(self.tw, description='needs to be done first')
+        dependency2 = Task(self.tw, description='needs to be done second')
 
         t.save()
         dependency1.save()
@@ -501,9 +526,9 @@ class TaskTest(TasklibTest):
 
     def test_remove_from_dependency_set(self):
         # Removes dependency from task with two dependencies
-        t = Task(self.tw, description="test task")
-        dependency1 = Task(self.tw, description="needs to be done first")
-        dependency2 = Task(self.tw, description="needs to be done second")
+        t = Task(self.tw, description='test task')
+        dependency1 = Task(self.tw, description='needs to be done first')
+        dependency2 = Task(self.tw, description='needs to be done second')
 
         dependency1.save()
         dependency2.save()
@@ -518,9 +543,9 @@ class TaskTest(TasklibTest):
 
     def test_add_to_dependency_set(self):
         # Adds dependency to task with one dependencies
-        t = Task(self.tw, description="test task")
-        dependency1 = Task(self.tw, description="needs to be done first")
-        dependency2 = Task(self.tw, description="needs to be done second")
+        t = Task(self.tw, description='test task')
+        dependency1 = Task(self.tw, description='needs to be done first')
+        dependency2 = Task(self.tw, description='needs to be done second')
 
         dependency1.save()
         dependency2.save()
@@ -535,8 +560,8 @@ class TaskTest(TasklibTest):
 
     def test_add_to_empty_dependency_set(self):
         # Adds dependency to task with one dependencies
-        t = Task(self.tw, description="test task")
-        dependency = Task(self.tw, description="needs to be done first")
+        t = Task(self.tw, description='test task')
+        dependency = Task(self.tw, description='needs to be done first')
 
         dependency.save()
 
@@ -547,30 +572,30 @@ class TaskTest(TasklibTest):
 
     def test_simple_dependency_set_save_repeatedly(self):
         # Adds only one dependency to task with no dependencies
-        t = Task(self.tw, description="test task")
-        dependency = Task(self.tw, description="needs to be done first")
+        t = Task(self.tw, description='test task')
+        dependency = Task(self.tw, description='needs to be done first')
         dependency.save()
 
         t['depends'] = set([dependency])
         t.save()
 
         # We taint the task, but keep depends intact
-        t['description'] = "test task modified"
+        t['description'] = 'test task modified'
         t.save()
 
         self.assertEqual(t['depends'], set([dependency]))
 
         # We taint the task, but assign the same set to the depends
         t['depends'] = set([dependency])
-        t['description'] = "test task modified again"
+        t['description'] = 'test task modified again'
         t.save()
 
         self.assertEqual(t['depends'], set([dependency]))
 
     def test_compare_different_tasks(self):
         # Negative: compare two different tasks
-        t1 = Task(self.tw, description="test task")
-        t2 = Task(self.tw, description="test task")
+        t1 = Task(self.tw, description='test task')
+        t2 = Task(self.tw, description='test task')
 
         t1.save()
         t2.save()
@@ -579,14 +604,14 @@ class TaskTest(TasklibTest):
 
     def test_compare_same_task_object(self):
         # Compare Task object wit itself
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
 
         self.assertEqual(t == t, True)
 
     def test_compare_same_task(self):
         # Compare the same task using two different objects
-        t1 = Task(self.tw, description="test task")
+        t1 = Task(self.tw, description='test task')
         t1.save()
 
         t2 = self.tw.tasks.get(uuid=t1['uuid'])
@@ -595,20 +620,20 @@ class TaskTest(TasklibTest):
     def test_compare_unsaved_tasks(self):
         # t1 and t2 are unsaved tasks, considered to be unequal
         # despite the content of data
-        t1 = Task(self.tw, description="test task")
-        t2 = Task(self.tw, description="test task")
+        t1 = Task(self.tw, description='test task')
+        t2 = Task(self.tw, description='test task')
 
         self.assertEqual(t1 == t2, False)
 
     def test_hash_unsaved_tasks(self):
         # Considered equal, it's the same object
-        t1 = Task(self.tw, description="test task")
+        t1 = Task(self.tw, description='test task')
         t2 = t1
         self.assertEqual(hash(t1) == hash(t2), True)
 
     def test_hash_same_task(self):
         # Compare the hash of the task using two different objects
-        t1 = Task(self.tw, description="test task")
+        t1 = Task(self.tw, description='test task')
         t1.save()
 
         t2 = self.tw.tasks.get(uuid=t1['uuid'])
@@ -616,15 +641,15 @@ class TaskTest(TasklibTest):
 
     def test_hash_unequal_unsaved_tasks(self):
         # Compare the hash of the task using two different objects
-        t1 = Task(self.tw, description="test task 1")
-        t2 = Task(self.tw, description="test task 2")
+        t1 = Task(self.tw, description='test task 1')
+        t2 = Task(self.tw, description='test task 2')
 
         self.assertNotEqual(t1.__hash__(), t2.__hash__())
 
     def test_hash_unequal_saved_tasks(self):
         # Compare the hash of the task using two different objects
-        t1 = Task(self.tw, description="test task 1")
-        t2 = Task(self.tw, description="test task 2")
+        t1 = Task(self.tw, description='test task 1')
+        t2 = Task(self.tw, description='test task 2')
 
         t1.save()
         t2.save()
@@ -632,11 +657,11 @@ class TaskTest(TasklibTest):
         self.assertNotEqual(t1.__hash__(), t2.__hash__())
 
     def test_adding_task_with_priority(self):
-        t = Task(self.tw, description="test task", priority="M")
+        t = Task(self.tw, description='test task', priority='M')
         t.save()
 
     def test_removing_priority_with_none(self):
-        t = Task(self.tw, description="test task", priority="L")
+        t = Task(self.tw, description='test task', priority='L')
         t.save()
 
         # Remove the priority mark
@@ -647,11 +672,11 @@ class TaskTest(TasklibTest):
         self.assertEqual(t['priority'], None)
 
     def test_adding_task_with_due_time(self):
-        t = Task(self.tw, description="test task", due=datetime.datetime.now())
+        t = Task(self.tw, description='test task', due=datetime.datetime.now())
         t.save()
 
     def test_removing_due_time_with_none(self):
-        t = Task(self.tw, description="test task", due=datetime.datetime.now())
+        t = Task(self.tw, description='test task', due=datetime.datetime.now())
         t.save()
 
         # Remove the due timestamp
@@ -668,15 +693,17 @@ class TaskTest(TasklibTest):
         self.assertEqual(set(t._modified_fields), set())
 
         # Modify the task
-        t['description'] = "test task"
+        t['description'] = 'test task'
         self.assertEqual(set(t._modified_fields), set(['description']))
 
         t['due'] = datetime.datetime(2014, 2, 14, 14, 14, 14)  # <3
         self.assertEqual(set(t._modified_fields), set(['description', 'due']))
 
-        t['project'] = "test project"
-        self.assertEqual(set(t._modified_fields),
-                         set(['description', 'due', 'project']))
+        t['project'] = 'test project'
+        self.assertEqual(
+            set(t._modified_fields),
+            set(['description', 'due', 'project']),
+        )
 
         # List of modified fields should clear out when saved
         t.save()
@@ -684,20 +711,20 @@ class TaskTest(TasklibTest):
 
         # Reassigning the fields with the same values now should not produce
         # modified fields
-        t['description'] = "test task"
+        t['description'] = 'test task'
         t['due'] = datetime.datetime(2014, 2, 14, 14, 14, 14)  # <3
-        t['project'] = "test project"
+        t['project'] = 'test project'
         self.assertEqual(set(t._modified_fields), set())
 
     def test_modified_fields_loaded_task(self):
         t = Task(self.tw)
 
         # Modify the task
-        t['description'] = "test task"
+        t['description'] = 'test task'
         t['due'] = datetime.datetime(2014, 2, 14, 14, 14, 14)  # <3
-        t['project'] = "test project"
+        t['project'] = 'test project'
 
-        dependency = Task(self.tw, description="dependency")
+        dependency = Task(self.tw, description='dependency')
         dependency.save()
         t['depends'] = set([dependency])
 
@@ -706,13 +733,13 @@ class TaskTest(TasklibTest):
         self.assertEqual(set(t._modified_fields), set())
 
         # Get the task by using a filter by UUID
-        t2 = self.tw.tasks.get(uuid=t['uuid'])
+        self.tw.tasks.get(uuid=t['uuid'])
 
         # Reassigning the fields with the same values now should not produce
         # modified fields
-        t['description'] = "test task"
+        t['description'] = 'test task'
         t['due'] = datetime.datetime(2014, 2, 14, 14, 14, 14)  # <3
-        t['project'] = "test project"
+        t['project'] = 'test project'
         t['depends'] = set([dependency])
         self.assertEqual(set(t._modified_fields), set())
 
@@ -720,7 +747,7 @@ class TaskTest(TasklibTest):
         t = Task(self.tw)
 
         for field in TASK_STANDARD_ATTRS:
-            value = t[field]
+            t[field]
 
         self.assertEqual(set(t._modified_fields), set())
 
@@ -728,30 +755,34 @@ class TaskTest(TasklibTest):
         # Test that we are unable to set readonly attrs through __init__
         for readonly_key in Task.read_only_fields:
             kwargs = {'description': 'test task', readonly_key: 'value'}
-            self.assertRaises(RuntimeError,
-                              lambda: Task(self.tw, **kwargs))
+            self.assertRaises(
+                RuntimeError,
+                lambda: Task(self.tw, **kwargs),
+            )
 
     def test_setting_read_only_attrs_through_setitem(self):
         # Test that we are unable to set readonly attrs through __init__
         for readonly_key in Task.read_only_fields:
             t = Task(self.tw, description='test task')
-            self.assertRaises(RuntimeError,
-                              lambda: t.__setitem__(readonly_key, 'value'))
+            self.assertRaises(
+                RuntimeError,
+                lambda: t.__setitem__(readonly_key, 'value'),
+            )
 
     def test_saving_unmodified_task(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t.save()
 
     def test_adding_tag_by_appending(self):
-        t = Task(self.tw, description="test task", tags=['test1'])
+        t = Task(self.tw, description='test task', tags=['test1'])
         t.save()
         t['tags'].add('test2')
         t.save()
         self.assertEqual(t['tags'], set(['test1', 'test2']))
 
     def test_adding_tag_twice(self):
-        t = Task(self.tw, description="test task", tags=['test1'])
+        t = Task(self.tw, description='test task', tags=['test1'])
         t.save()
         t['tags'].add('test2')
         t['tags'].add('test2')
@@ -759,7 +790,7 @@ class TaskTest(TasklibTest):
         self.assertEqual(t['tags'], set(['test1', 'test2']))
 
     def test_adding_tag_by_appending_empty(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t.save()
         t['tags'].add('test')
         t.save()
@@ -768,16 +799,26 @@ class TaskTest(TasklibTest):
     def test_serializers_returning_empty_string_for_none(self):
         # Test that any serializer returns '' when passed None
         t = Task(self.tw)
-        serializers = [getattr(t, serializer_name) for serializer_name in
-                       filter(lambda x: x.startswith('serialize_'), dir(t))]
+        serializers = [
+            getattr(t, serializer_name)
+            for serializer_name in filter(
+                lambda x: x.startswith('serialize_'),
+                dir(t),
+            )
+        ]
         for serializer in serializers:
             self.assertEqual(serializer(None), '')
 
     def test_deserializer_returning_empty_value_for_empty_string(self):
         # Test that any deserializer returns empty value when passed ''
         t = Task(self.tw)
-        deserializers = [getattr(t, deserializer_name) for deserializer_name in
-                        filter(lambda x: x.startswith('deserialize_'), dir(t))]
+        deserializers = [
+            getattr(t, deserializer_name)
+            for deserializer_name in filter(
+                lambda x: x.startswith('deserialize_'),
+                dir(t),
+            )
+        ]
         for deserializer in deserializers:
             self.assertTrue(deserializer('') in (None, [], set()))
 
@@ -790,15 +831,23 @@ class TaskTest(TasklibTest):
 
     def test_recurrent_task_generation(self):
         today = datetime.date.today()
-        t = Task(self.tw, description="brush teeth",
-                 due=today, recur="daily")
+        t = Task(
+            self.tw,
+            description='brush teeth',
+            due=today,
+            recur='daily',
+        )
         t.save()
         self.assertEqual(len(self.tw.tasks.pending()), 2)
 
     def test_spawned_task_parent(self):
         today = datetime.date.today()
-        t = Task(self.tw, description="brush teeth",
-                 due=today, recur="daily")
+        t = Task(
+            self.tw,
+            description='brush teeth',
+            due=today,
+            recur='daily',
+        )
         t.save()
 
         spawned = self.tw.tasks.pending().get(due=today)
@@ -806,20 +855,111 @@ class TaskTest(TasklibTest):
 
     def test_modify_number_of_tasks_at_once(self):
         for i in range(1, 100):
-            Task(self.tw, description="test task %d" % i, tags=['test']).save()
+            Task(self.tw, description='test task %d' % i, tags=['test']).save()
 
         self.tw.execute_command(['+test', 'mod', 'unified', 'description'])
 
     def test_return_all_from_executed_command(self):
-        Task(self.tw, description="test task", tags=['test']).save()
+        Task(self.tw, description='test task', tags=['test']).save()
         out, err, rc = self.tw.execute_command(['count'], return_all=True)
         self.assertEqual(rc, 0)
 
     def test_return_all_from_failed_executed_command(self):
-        Task(self.tw, description="test task", tags=['test']).save()
-        out, err, rc = self.tw.execute_command(['countinvalid'],
-            return_all=True, allow_failure=False)
+        Task(self.tw, description='test task', tags=['test']).save()
+        out, err, rc = self.tw.execute_command(
+            ['countinvalid'],
+            return_all=True,
+            allow_failure=False,
+        )
         self.assertNotEqual(rc, 0)
+
+    def test_task_active_time(self):
+        for task_file in [
+            'backlog.data',
+            'completed.data',
+            'pending.data',
+            'undo.data',
+        ]:
+            shutil.copyfile(
+                'tasklib/tests.data/{}'.format(task_file),
+                os.path.join(self.tmp, task_file),
+            )
+        self.tw.history = TaskHistory(self.tw)
+        self.tw.history.get_history()
+        task = self.tw.tasks.get(uuid='e06d3893-d716-4a22-a06b-0d41e924d2ca')
+        self.assertEqual(task.active_time(), 25.0)
+
+    def test_task_active_time_specifying_period_by_date(self):
+        for task_file in [
+            'backlog.data',
+            'completed.data',
+            'pending.data',
+            'undo.data',
+        ]:
+            shutil.copyfile(
+                'tasklib/tests.data/{}'.format(task_file),
+                os.path.join(self.tmp, task_file),
+            )
+        self.tw.history = TaskHistory(self.tw)
+        self.tw.history.get_history()
+        task = self.tw.tasks.get(uuid='e06d3893-d716-4a22-a06b-0d41e924d2ca')
+        self.assertEqual(task.active_time('1984-01-01'), 25.0)
+
+    def test_task_active_time_specifying_period_by_taskwarrior_string(self):
+        for task_file in [
+            'backlog.data',
+            'completed.data',
+            'pending.data',
+            'undo.data',
+        ]:
+            shutil.copyfile(
+                'tasklib/tests.data/{}'.format(task_file),
+                os.path.join(self.tmp, task_file),
+            )
+        self.tw.history = TaskHistory(self.tw)
+        self.tw.history.get_history()
+        task = self.tw.tasks.get(uuid='e06d3893-d716-4a22-a06b-0d41e924d2ca')
+        self.assertEqual(task.active_time('now - 1d'), 0)
+
+    def test_started_twice_task_active_time(self):
+        for task_file in [
+            'backlog.data',
+            'completed.data',
+            'pending.data',
+            'undo.data',
+        ]:
+            shutil.copyfile(
+                'tasklib/tests.data/{}'.format(task_file),
+                os.path.join(self.tmp, task_file),
+            )
+        self.tw.history = TaskHistory(self.tw)
+        self.tw.history.get_history()
+        task = self.tw.tasks.get(uuid='eddeddae-e965-4283-b4ac-c1370d90f5a7')
+        self.assertEqual(task.active_time(), 33.0)
+
+    def test_set_task_attrs_without_udas(self):
+        self.tw._set_task_attrs()
+        self.assertTrue(
+            all(
+                (
+                    attribute in self.tw.available_task_attrs
+                    for attribute in TASK_STANDARD_ATTRS
+                ),
+            ),
+        )
+
+    def test_set_task_attrs_with_udas(self):
+        shutil.copyfile(
+            'tasklib/tests.data/taskrc_with_udas',
+            os.path.join(self.tmp, 'taskrc'),
+        )
+        self.tw = TaskWarrior(
+            data_location=self.tmp,
+            taskrc_location=os.path.join(self.tmp, 'taskrc'),
+        )
+        self.tw._set_task_attrs()
+        self.assertEqual(self.tw.config['uda.testuda.label'], 'UDA test')
+        self.assertEqual(self.tw.config['uda.testuda.type'], 'string')
 
 
 class TaskFromHookTest(TasklibTest):
@@ -829,7 +969,8 @@ class TaskFromHookTest(TasklibTest):
         '"entry":"20141118T050231Z",'
         '"status":"pending",'
         '"start":"20141119T152233Z",'
-        '"uuid":"a360fc44-315c-4366-b70c-ea7e7520b749"}')
+        '"uuid":"a360fc44-315c-4366-b70c-ea7e7520b749"}',
+    )
 
     input_add_data_recurring = six.StringIO(
         '{"description":"Mow the lawn",'
@@ -837,46 +978,65 @@ class TaskFromHookTest(TasklibTest):
         '"parent":"62da6227-519c-42c2-915d-dccada926ad7",'
         '"recur":"weekly",'
         '"status":"pending",'
-        '"uuid":"81305335-0237-49ff-8e87-b3cdc2369cec"}')
+        '"uuid":"81305335-0237-49ff-8e87-b3cdc2369cec"}',
+    )
 
-    input_modify_data = six.StringIO(input_add_data.getvalue() + '\n' +
-        '{"description":"Buy some milk finally",'
-        '"entry":"20141118T050231Z",'
-        '"status":"completed",'
-        '"uuid":"a360fc44-315c-4366-b70c-ea7e7520b749"}')
+    input_modify_data = six.StringIO(
+        '\n'.join([
+            input_add_data.getvalue(),
+            (
+                '{"description":"Buy some milk finally",'
+                '"entry":"20141118T050231Z",'
+                '"status":"completed",'
+                '"uuid":"a360fc44-315c-4366-b70c-ea7e7520b749"}'
+            ),
+        ]),
+    )
 
     exported_raw_data = (
         '{"project":"Home",'
-         '"due":"20150101T232323Z",'
-         '"description":"test task"}')
+        '"due":"20150101T232323Z",'
+        '"description":"test task"}'
+    )
 
     def test_setting_up_from_add_hook_input(self):
         t = Task.from_input(input_file=self.input_add_data, backend=self.tw)
-        self.assertEqual(t['description'], "Buy some milk")
+        self.assertEqual(t['description'], 'Buy some milk')
         self.assertEqual(t.pending, True)
 
     def test_setting_up_from_add_hook_input_recurring(self):
-        t = Task.from_input(input_file=self.input_add_data_recurring,
-                            backend=self.tw)
-        self.assertEqual(t['description'], "Mow the lawn")
+        t = Task.from_input(
+            input_file=self.input_add_data_recurring,
+            backend=self.tw,
+        )
+        self.assertEqual(t['description'], 'Mow the lawn')
         self.assertEqual(t.pending, True)
 
     def test_setting_up_from_modified_hook_input(self):
-        t = Task.from_input(input_file=self.input_modify_data, modify=True,
-                            backend=self.tw)
-        self.assertEqual(t['description'], "Buy some milk finally")
+        t = Task.from_input(
+            input_file=self.input_modify_data,
+            modify=True,
+            backend=self.tw,
+        )
+        self.assertEqual(t['description'], 'Buy some milk finally')
         self.assertEqual(t.pending, False)
         self.assertEqual(t.completed, True)
 
-        self.assertEqual(t._original_data['status'], "pending")
-        self.assertEqual(t._original_data['description'], "Buy some milk")
-        self.assertEqual(set(t._modified_fields),
-                         set(['status', 'description', 'start']))
+        self.assertEqual(t._original_data['status'], 'pending')
+        self.assertEqual(t._original_data['description'], 'Buy some milk')
+        self.assertEqual(
+            set(t._modified_fields),
+            set(['status', 'description', 'start']),
+        )
 
     def test_export_data(self):
-        t = Task(self.tw, description="test task",
-            project="Home",
-            due=pytz.utc.localize(datetime.datetime(2015,1,1,23,23,23)))
+        t = Task(
+            self.tw,
+            description='test task',
+            project='Home',
+            due=pytz.utc.localize(
+                datetime.datetime(2015, 1, 1, 23, 23, 23)),
+        )
 
         # Check that the output is a permutation of:
         # {"project":"Home","description":"test task","due":"20150101232323Z"}
@@ -886,78 +1046,88 @@ class TaskFromHookTest(TasklibTest):
             for segments in itertools.permutations(allowed_segments)
         ]
 
-        self.assertTrue(any(t.export_data() == expected
-                            for expected in allowed_output))
+        self.assertTrue(
+            any(t.export_data() == expected
+                for expected in allowed_output),
+        )
+
 
 class TimezoneAwareDatetimeTest(TasklibTest):
 
     def setUp(self):
         super(TimezoneAwareDatetimeTest, self).setUp()
         self.zone = local_zone
-        self.localdate_naive = datetime.datetime(2015,2,2)
-        self.localtime_naive = datetime.datetime(2015,2,2,0,0,0)
+        self.localdate_naive = datetime.datetime(2015, 2, 2)
+        self.localtime_naive = datetime.datetime(2015, 2, 2, 0, 0, 0)
         self.localtime_aware = self.zone.localize(self.localtime_naive)
         self.utctime_aware = self.localtime_aware.astimezone(pytz.utc)
 
     def test_timezone_naive_datetime_setitem(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t['due'] = self.localtime_naive
         self.assertEqual(t['due'], self.localtime_aware)
 
     def test_timezone_naive_datetime_using_init(self):
-        t = Task(self.tw, description="test task", due=self.localtime_naive)
+        t = Task(self.tw, description='test task', due=self.localtime_naive)
         self.assertEqual(t['due'], self.localtime_aware)
 
     def test_filter_by_naive_datetime(self):
-        t = Task(self.tw, description="task1", due=self.localtime_naive)
+        t = Task(self.tw, description='task1', due=self.localtime_naive)
         t.save()
         matching_tasks = self.tw.tasks.filter(due=self.localtime_naive)
         self.assertEqual(len(matching_tasks), 1)
 
     def test_serialize_naive_datetime(self):
-        t = Task(self.tw, description="task1", due=self.localtime_naive)
-        self.assertEqual(json.loads(t.export_data())['due'],
-                         self.utctime_aware.strftime(DATE_FORMAT))
+        t = Task(self.tw, description='task1', due=self.localtime_naive)
+        self.assertEqual(
+            json.loads(t.export_data())['due'],
+            self.utctime_aware.strftime(DATE_FORMAT),
+        )
 
     def test_timezone_naive_date_setitem(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t['due'] = self.localdate_naive
         self.assertEqual(t['due'], self.localtime_aware)
 
     def test_timezone_naive_date_using_init(self):
-        t = Task(self.tw, description="test task", due=self.localdate_naive)
+        t = Task(self.tw, description='test task', due=self.localdate_naive)
         self.assertEqual(t['due'], self.localtime_aware)
 
     def test_filter_by_naive_date(self):
-        t = Task(self.tw, description="task1", due=self.localdate_naive)
+        t = Task(self.tw, description='task1', due=self.localdate_naive)
         t.save()
         matching_tasks = self.tw.tasks.filter(due=self.localdate_naive)
         self.assertEqual(len(matching_tasks), 1)
 
     def test_serialize_naive_date(self):
-        t = Task(self.tw, description="task1", due=self.localdate_naive)
-        self.assertEqual(json.loads(t.export_data())['due'],
-                         self.utctime_aware.strftime(DATE_FORMAT))
+        t = Task(self.tw, description='task1', due=self.localdate_naive)
+        self.assertEqual(
+            json.loads(t.export_data())['due'],
+            self.utctime_aware.strftime(DATE_FORMAT),
+        )
 
     def test_timezone_aware_datetime_setitem(self):
-        t = Task(self.tw, description="test task")
+        t = Task(self.tw, description='test task')
         t['due'] = self.localtime_aware
         self.assertEqual(t['due'], self.localtime_aware)
 
     def test_timezone_aware_datetime_using_init(self):
-        t = Task(self.tw, description="test task", due=self.localtime_aware)
+        t = Task(self.tw, description='test task', due=self.localtime_aware)
         self.assertEqual(t['due'], self.localtime_aware)
 
     def test_filter_by_aware_datetime(self):
-        t = Task(self.tw, description="task1", due=self.localtime_aware)
+        t = Task(self.tw, description='task1', due=self.localtime_aware)
         t.save()
         matching_tasks = self.tw.tasks.filter(due=self.localtime_aware)
         self.assertEqual(len(matching_tasks), 1)
 
     def test_serialize_aware_datetime(self):
-        t = Task(self.tw, description="task1", due=self.localtime_aware)
-        self.assertEqual(json.loads(t.export_data())['due'],
-                         self.utctime_aware.strftime(DATE_FORMAT))
+        t = Task(self.tw, description='task1', due=self.localtime_aware)
+        self.assertEqual(
+            json.loads(t.export_data())['due'],
+            self.utctime_aware.strftime(DATE_FORMAT),
+        )
+
 
 class DatetimeStringTest(TasklibTest):
 
@@ -970,11 +1140,11 @@ class DatetimeStringTest(TasklibTest):
             else:
                 return
 
-        t = Task(self.tw, description="test task", due="now")
+        t = Task(self.tw, description='test task', due='now')
         now = local_zone.localize(datetime.datetime.now())
 
         # Assert that both times are not more than 5 seconds apart
-        if sys.version_info < (2,7):
+        if sys.version_info < (2, 7):
             self.assertTrue(total_seconds_2_6(now - t['due']) < 5)
             self.assertTrue(total_seconds_2_6(t['due'] - now) < 5)
         else:
@@ -990,7 +1160,7 @@ class DatetimeStringTest(TasklibTest):
             else:
                 return
 
-        t = Task(self.tw, description="test task", due="eoy")
+        t = Task(self.tw, description='test task', due='eoy')
         now = local_zone.localize(datetime.datetime.now())
         eoy = local_zone.localize(datetime.datetime(
             year=now.year,
@@ -998,7 +1168,7 @@ class DatetimeStringTest(TasklibTest):
             day=31,
             hour=23,
             minute=59,
-            second=59
+            second=59,
             ))
         self.assertEqual(eoy, t['due'])
 
@@ -1011,16 +1181,18 @@ class DatetimeStringTest(TasklibTest):
             else:
                 return
 
-        t = Task(self.tw, description="test task", due="eoy - 4 months")
+        t = Task(self.tw, description='test task', due='eoy - 4 months')
         now = local_zone.localize(datetime.datetime.now())
-        due_date = local_zone.localize(datetime.datetime(
-            year=now.year,
-            month=12,
-            day=31,
-            hour=23,
-            minute=59,
-            second=59
-            )) - datetime.timedelta(0,4 * 30 * 86400)
+        due_date = local_zone.localize(
+            datetime.datetime(
+                year=now.year,
+                month=12,
+                day=31,
+                hour=23,
+                minute=59,
+                second=59,
+            )
+        ) - datetime.timedelta(0, 4 * 30 * 86400)
         self.assertEqual(due_date, t['due'])
 
     def test_filtering_with_string_datetime(self):
@@ -1032,16 +1204,20 @@ class DatetimeStringTest(TasklibTest):
             else:
                 return
 
-        t = Task(self.tw, description="test task",
-                 due=datetime.datetime.now() - datetime.timedelta(0,2))
+        t = Task(
+            self.tw,
+            description='test task',
+            due=datetime.datetime.now() - datetime.timedelta(0, 2),
+        )
         t.save()
-        self.assertEqual(len(self.tw.tasks.filter(due__before="now")), 1)
+        self.assertEqual(len(self.tw.tasks.filter(due__before='now')), 1)
+
 
 class AnnotationTest(TasklibTest):
 
     def setUp(self):
         super(AnnotationTest, self).setUp()
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
 
     def test_adding_annotation(self):
         task = self.tw.tasks.get()
@@ -1071,20 +1247,20 @@ class AnnotationTest(TasklibTest):
         self.assertEqual(len(task['annotations']), 0)
 
     def test_annotation_after_modification(self):
-         task = self.tw.tasks.get()
-         task['project'] = 'test'
-         task.add_annotation('I should really do this task')
-         self.assertEqual(task['project'], 'test')
-         task.save()
-         self.assertEqual(task['project'], 'test')
+        task = self.tw.tasks.get()
+        task['project'] = 'test'
+        task.add_annotation('I should really do this task')
+        self.assertEqual(task['project'], 'test')
+        task.save()
+        self.assertEqual(task['project'], 'test')
 
     def test_serialize_annotations(self):
         # Test that serializing annotations is possible
-        t = Task(self.tw, description="test")
+        t = Task(self.tw, description='test')
         t.save()
 
-        t.add_annotation("annotation1")
-        t.add_annotation("annotation2")
+        t.add_annotation('annotation1')
+        t.add_annotation('annotation2')
 
         data = t._serialize('annotations', t._data['annotations'])
 
@@ -1092,59 +1268,66 @@ class AnnotationTest(TasklibTest):
         self.assertEqual(type(data[0]), dict)
         self.assertEqual(type(data[1]), dict)
 
-        self.assertEqual(data[0]['description'], "annotation1")
-        self.assertEqual(data[1]['description'], "annotation2")
+        self.assertEqual(data[0]['description'], 'annotation1')
+        self.assertEqual(data[1]['description'], 'annotation2')
 
 
 class UnicodeTest(TasklibTest):
 
     def test_unicode_task(self):
-        Task(self.tw, description=six.u("†åßk")).save()
+        Task(self.tw, description=six.u('†åßk')).save()
         self.tw.tasks.get()
 
     def test_filter_by_unicode_task(self):
-        Task(self.tw, description=six.u("†åßk")).save()
-        tasks = self.tw.tasks.filter(description=six.u("†åßk"))
+        Task(self.tw, description=six.u('†åßk')).save()
+        tasks = self.tw.tasks.filter(description=six.u('†åßk'))
         self.assertEqual(len(tasks), 1)
 
     def test_non_unicode_task(self):
-        Task(self.tw, description="test task").save()
+        Task(self.tw, description='test task').save()
         self.tw.tasks.get()
+
 
 class ReadOnlyDictViewTest(unittest.TestCase):
 
     def setUp(self):
-        self.sample = dict(l=[1,2,3], d={'k':'v'})
+        self.sample = dict(sample_list=[1, 2, 3], sample_dict={'key': 'value'})
         self.original_sample = copy.deepcopy(self.sample)
         self.view = ReadOnlyDictView(self.sample)
 
     def test_readonlydictview_getitem(self):
-        l = self.view['l']
-        self.assertEqual(l, self.sample['l'])
+        sample_list = self.view['sample_list']
+        self.assertEqual(sample_list, self.sample['sample_list'])
 
         # Assert that modification changed only copied value
-        l.append(4)
-        self.assertNotEqual(l, self.sample['l'])
+        sample_list.append(4)
+        self.assertNotEqual(sample_list, self.sample['sample_list'])
 
         # Assert that viewed dict is not changed
         self.assertEqual(self.sample, self.original_sample)
 
     def test_readonlydictview_contains(self):
-        self.assertEqual('l' in self.view, 'l' in self.sample)
-        self.assertEqual('d' in self.view, 'd' in self.sample)
-        self.assertEqual('k' in self.view, 'k' in self.sample)
+        self.assertEqual('sample_list' in self.view,
+                         'sample_list' in self.sample)
+        self.assertEqual('sample_dict' in self.view,
+                         'sample_dict' in self.sample)
+        self.assertEqual('key' in self.view, 'key' in self.sample)
 
         # Assert that viewed dict is not changed
         self.assertEqual(self.sample, self.original_sample)
 
     def test_readonlydictview_iter(self):
-        self.assertEqual(list(k for k in self.view),
-                         list(k for k in self.sample))
+        self.assertEqual(
+            list(key for key in self.view),
+            list(key for key in self.sample),
+        )
 
         # Assert the view is correct after modification
         self.sample['new'] = 'value'
-        self.assertEqual(list(k for k in self.view),
-                         list(k for k in self.sample))
+        self.assertEqual(
+            list(key for key in self.view),
+            list(key for key in self.sample),
+        )
 
     def test_readonlydictview_len(self):
         self.assertEqual(len(self.view), len(self.sample))
@@ -1154,12 +1337,12 @@ class ReadOnlyDictViewTest(unittest.TestCase):
         self.assertEqual(len(self.view), len(self.sample))
 
     def test_readonlydictview_get(self):
-        l = self.view.get('l')
-        self.assertEqual(l, self.sample.get('l'))
+        sample_list = self.view.get('sample_list')
+        self.assertEqual(sample_list, self.sample.get('sample_list'))
 
         # Assert that modification changed only copied value
-        l.append(4)
-        self.assertNotEqual(l, self.sample.get('l'))
+        sample_list.append(4)
+        self.assertNotEqual(sample_list, self.sample.get('sample_list'))
 
         # Assert that viewed dict is not changed
         self.assertEqual(self.sample, self.original_sample)
@@ -1190,7 +1373,7 @@ class LazyUUIDTaskTest(TasklibTest):
     def setUp(self):
         super(LazyUUIDTaskTest, self).setUp()
 
-        self.stored = Task(self.tw, description="this is test task")
+        self.stored = Task(self.tw, description='this is test task')
         self.stored.save()
 
         self.lazy = LazyUUIDTask(self.tw, self.stored['uuid'])
@@ -1272,9 +1455,9 @@ class LazyUUIDTaskSetTest(TasklibTest):
     def setUp(self):
         super(LazyUUIDTaskSetTest, self).setUp()
 
-        self.task1 = Task(self.tw, description="task 1")
-        self.task2 = Task(self.tw, description="task 2")
-        self.task3 = Task(self.tw, description="task 3")
+        self.task1 = Task(self.tw, description='task 1')
+        self.task2 = Task(self.tw, description='task 2')
+        self.task3 = Task(self.tw, description='task 3')
 
         self.task1.save()
         self.task2.save()
@@ -1283,7 +1466,7 @@ class LazyUUIDTaskSetTest(TasklibTest):
         self.uuids = (
             self.task1['uuid'],
             self.task2['uuid'],
-            self.task3['uuid']
+            self.task3['uuid'],
         )
 
         self.lazy = LazyUUIDTaskSet(self.tw, self.uuids)
@@ -1315,7 +1498,7 @@ class LazyUUIDTaskSetTest(TasklibTest):
         taskset = set([self.task1])
         lazyset = LazyUUIDTaskSet(
             self.tw,
-            (self.task2['uuid'], self.task3['uuid'])
+            (self.task2['uuid'], self.task3['uuid']),
         )
 
         assert taskset | lazyset == self.lazy
@@ -1330,7 +1513,7 @@ class LazyUUIDTaskSetTest(TasklibTest):
         taskset = set([self.task1, self.task2])
         lazyset = LazyUUIDTaskSet(
             self.tw,
-            (self.task2['uuid'], self.task3['uuid'])
+            (self.task2['uuid'], self.task3['uuid']),
         )
 
         assert taskset - lazyset == set([self.task1])
@@ -1345,13 +1528,19 @@ class LazyUUIDTaskSetTest(TasklibTest):
         taskset = set([self.task1, self.task2])
         lazyset = LazyUUIDTaskSet(
             self.tw,
-            (self.task2['uuid'], self.task3['uuid'])
+            (self.task2['uuid'], self.task3['uuid']),
         )
 
         assert taskset ^ lazyset == set([self.task1, self.task3])
         assert lazyset ^ taskset == set([self.task1, self.task3])
-        assert taskset.symmetric_difference(lazyset) == set([self.task1, self.task3])
-        assert lazyset.symmetric_difference(taskset) == set([self.task1, self.task3])
+        self.assertEqual(
+            taskset.symmetric_difference(lazyset),
+            set([self.task1, self.task3]),
+        )
+        self.assertEqual(
+            lazyset.symmetric_difference(taskset),
+            set([self.task1, self.task3]),
+        )
 
         lazyset ^= taskset
         assert lazyset == set([self.task1, self.task3])
@@ -1360,7 +1549,7 @@ class LazyUUIDTaskSetTest(TasklibTest):
         taskset = set([self.task1, self.task2])
         lazyset = LazyUUIDTaskSet(
             self.tw,
-            (self.task2['uuid'], self.task3['uuid'])
+            (self.task2['uuid'], self.task3['uuid']),
         )
 
         assert taskset & lazyset == set([self.task2])
@@ -1375,6 +1564,216 @@ class LazyUUIDTaskSetTest(TasklibTest):
 class TaskWarriorBackendTest(TasklibTest):
 
     def test_config(self):
-        assert self.tw.config['nag'] == "You have more urgent tasks."
-        assert self.tw.config['default.command'] == "next"
-        assert self.tw.config['dependency.indicator'] == "D"
+        assert self.tw.config['nag'] == 'You have more urgent tasks.'
+        assert self.tw.config['default.command'] == 'next'
+        assert self.tw.config['dependency.indicator'] == 'D'
+
+
+class TaskHistoryTest(TasklibTest):
+    def setUp(self):
+        super(TaskHistoryTest, self).setUp()
+        shutil.copyfile(
+            'tasklib/tests.data/undo.data',
+            os.path.join(self.tmp, 'undo.data'),
+        )
+        shutil.copyfile(
+            'tasklib/tests.data/empty-taskrc',
+            os.path.join(self.tmp, 'taskrc'),
+        )
+        self.tw = TaskWarrior(
+            data_location=self.tmp,
+            taskrc_location=os.path.join(self.tmp, 'taskrc'),
+        )
+        self.tw.history = TaskHistory(self.tw)
+
+    def test_conversion_from_undo_timestamp_to_datetime(self):
+        undo_timestamp = '1500364111'
+        desired_timestamp = local_zone.localize(
+            datetime.datetime.fromtimestamp(float(undo_timestamp)),
+        )
+        self.assertEqual(
+            self.tw.history._convert_timestamp(undo_timestamp),
+            desired_timestamp,
+        )
+
+    def test_parsing_of_old_history_entry(self):
+        old_entry = (
+            'old [description:"Started once task" '
+            'entry:"1500364111" modified:"1500364111" '
+            'priority:"M" status:"pending" '
+            'uuid:"1eb86cd0-1b7e-4688-ac9b-227c731bf433"]'
+        )
+        parsed = self.tw.history._convert_history_entry(old_entry, 'old')
+        self.assertEqual(
+            parsed['modified'],
+            self.tw.history._convert_timestamp("1500364111"),
+        )
+        self.assertEqual(parsed['uuid'], "1eb86cd0-1b7e-4688-ac9b-227c731bf433")
+        self.assertEqual(
+            parsed['entry'],
+            self.tw.history._convert_timestamp("1500364111"),
+        )
+        self.assertEqual(parsed['description'], "Started once task")
+        self.assertEqual(parsed['status'], 'pending')
+        self.assertEqual(parsed['priority'], 'M')
+
+    def test_parsing_of_new_history_entry(self):
+        new_entry = (
+            'new [description:"Started once task" '
+            'entry:"1500364111" modified:"1500364117" '
+            'priority:"M" start:"1500364117" status:"pending" '
+            'uuid:"1eb86cd0-1b7e-4688-ac9b-227c731bf433"]'
+        )
+        parsed = self.tw.history._convert_history_entry(new_entry, 'new')
+        self.assertEqual(
+            parsed['modified'],
+            self.tw.history._convert_timestamp("1500364117"),
+        )
+        self.assertEqual(parsed['uuid'], "1eb86cd0-1b7e-4688-ac9b-227c731bf433")
+        self.assertEqual(
+            parsed['entry'],
+            self.tw.history._convert_timestamp("1500364111"),
+        )
+        self.assertEqual(
+            parsed['start'],
+            self.tw.history._convert_timestamp("1500364117"),
+        )
+        self.assertEqual(parsed['description'], "Started once task")
+        self.assertEqual(parsed['status'], 'pending')
+        self.assertEqual(parsed['priority'], 'M')
+
+    def test_load_history_from_source(self):
+        self.tw.history._load_history_from_source()
+        self.assertEqual(
+            self.tw.history.entries[0],
+            {
+                'new': {
+                    'modified': local_zone.localize(
+                        datetime.datetime(2017, 7, 18, 9, 48, 31),
+                    ),
+                    'uuid': '1eb86cd0-1b7e-4688-ac9b-227c731bf433',
+                    'description': 'Started once task',
+                    'status': 'pending',
+                    'priority': 'M',
+                    'entry': local_zone.localize(
+                        datetime.datetime(2017, 7, 18, 9, 48, 31),
+                    ),
+                },
+                'time': local_zone.localize(
+                    datetime.datetime(2017, 7, 18, 9, 48, 31),
+                ),
+            },
+        )
+        self.assertEqual(
+            self.tw.history.entries[1],
+            {
+                'new': {
+                    'start': local_zone.localize(
+                        datetime.datetime(2017, 7, 18, 9, 48, 37),
+                    ),
+                    'modified': local_zone.localize(
+                        datetime.datetime(2017, 7, 18, 9, 48, 37),
+                    ),
+                    'uuid': '1eb86cd0-1b7e-4688-ac9b-227c731bf433',
+                    'description': 'Started once task',
+                    'status': 'pending',
+                    'priority': 'M',
+                    'entry': local_zone.localize(
+                        datetime.datetime(2017, 7, 18, 9, 48, 31),
+                    ),
+                },
+                'time': local_zone.localize(
+                    datetime.datetime(2017, 7, 18, 9, 48, 37),
+                ),
+                'old': {
+                    'modified': local_zone.localize(
+                        datetime.datetime(2017, 7, 18, 9, 48, 31),
+                    ),
+                    'uuid': '1eb86cd0-1b7e-4688-ac9b-227c731bf433',
+                    'description': 'Started once task',
+                    'status': 'pending',
+                    'priority': 'M',
+                    'entry': local_zone.localize(
+                        datetime.datetime(2017, 7, 18, 9, 48, 31),
+                    ),
+                },
+            },
+        )
+
+    def test_dont_save_history_to_cache_when_not_set(self):
+        self.tw.history._load_history_from_source()
+        self.assertFalse(self.tw.history._save_history())
+
+
+class TaskHistoryCacheTest(TasklibTest):
+    def setUp(self):
+        super(TaskHistoryCacheTest, self).setUp()
+        shutil.copyfile(
+            'tasklib/tests.data/undo.data',
+            os.path.join(self.tmp, 'undo.data'),
+        )
+        shutil.copyfile(
+            'tasklib/tests.data/history-cache-taskrc',
+            os.path.join(self.tmp, 'taskrc'),
+        )
+        self.tw = TaskWarrior(
+            data_location=self.tmp,
+            taskrc_location=os.path.join(self.tmp, 'taskrc'),
+        )
+        self.tw.history = TaskHistory(self.tw)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+        try:
+            os.remove(self.tw.config['history.cache.location'])
+        except Exception:
+            pass
+
+    def test_save_history_to_cache_when_set(self):
+        self.tw.history._load_history_from_source()
+        self.assertTrue(self.tw.history._save_history())
+
+    def test_load_history_from_cache(self):
+        shutil.copyfile(
+            'tasklib/tests.data/history.cache',
+            'history.cache',
+        )
+        self.tw.history._load_history_from_source()
+        source_loaded_entries = self.tw.history.entries
+        self.tw.history.entries = ''
+        self.tw.history._load_history_from_cache()
+        self.assertEqual(
+            source_loaded_entries,
+            self.tw.history.entries,
+        )
+
+    def test_detect_cache_is_not_outdated(self):
+        shutil.copyfile(
+            'tasklib/tests.data/history.cache',
+            'history.cache',
+        )
+        self.assertTrue(self.tw.history._cache_is_updated())
+
+    def test_detect_cache_is_outdated(self):
+        shutil.copyfile(
+            'tasklib/tests.data/history.cache',
+            'history.cache',
+        )
+        # The cache is set to 1 second
+        time.sleep(2)
+        self.assertFalse(self.tw.history._cache_is_updated())
+
+    def test_get_history_from_source_and_save_cache(self):
+        self.tw.history.get_history()
+        self.assertGreater(len(self.tw.history.entries), 0)
+        self.assertTrue(os.path.isfile('history.cache'))
+
+    def test_get_history_from_cache(self):
+        shutil.copyfile(
+            'tasklib/tests.data/history.cache',
+            'history.cache',
+        )
+        os.remove(os.path.join(self.tmp, 'undo.data'))
+        # The cache is set to 1 second
+        self.tw.history.get_history()
+        self.assertGreater(len(self.tw.history.entries), 0)
