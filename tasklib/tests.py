@@ -1595,6 +1595,18 @@ class TaskWarriorBackendTest(TasklibTest):
         assert self.tw.config['default.command'] == 'next'
         assert self.tw.config['dependency.indicator'] == 'D'
 
+    def test_config_save_ordered(self):
+        taskrc_path = os.path.join(self.tmp, 'taskrc')
+        open(taskrc_path, 'a').close()
+        self.tw = TaskWarrior(
+            data_location=self.tmp,
+            taskrc_location=taskrc_path,
+        )
+        self.tw.save_config()
+        with open(taskrc_path, 'r') as f:
+            f_contents = f.read()
+            assert 'default.command=next' in f_contents
+            assert 'avoidlastcolumn=no\nbulk=0' in f_contents
 
 class TaskHistoryTest(TasklibTest):
     def setUp(self):
