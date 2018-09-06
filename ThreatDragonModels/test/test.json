@@ -1,0 +1,18 @@
+{
+  "summary": {
+    "title": "test",
+    "owner": "lyz",
+    "description": "asdf"
+  },
+  "detail": {
+    "contributors": [],
+    "diagrams": [
+      {
+        "title": "asdf",
+        "thumbnail": "./public/content/images/thumbnail.jpg",
+        "id": 0
+      }
+    ],
+    "reviewer": "lyz"
+  }
+}
